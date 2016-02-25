@@ -16,41 +16,39 @@ const url = require('url');
  * Hot Module Replacement updates to the simulator.
  */
 function attachHMRServer({httpServer, path, packagerServer}) {
-  
+
   let clients = [];
-  
+  let clientsPerBundleEntry = {};
+
   let platformCache = {
-    android: {
-      dependenciesCache: [],
-      dependenciesModulesCache: {},
-      shallowDependencies: {},
-      bundleEntry: '',
-    },
-    iOS: {
-      dependenciesCache: [],
-      dependenciesModulesCache: {},
-      shallowDependencies: {},
-      bundleEntry: '',
-    },
-  }
+    android: {},
+    iOS: {},
+  };
 
   function addClient (client) {
-    
-      // Only register callback if it's the first client
-      if (clients.length === 0) {
-        packagerServer.setHMRFileChangeListener(onHMRChange);
-      }
 
-      client.ws.on('error', e => {
-        console.error('[Hot Module Replacement] Unexpected error', e);
-        disconnect(client);
-      });
+    client.ws.on('error', e => {
+      console.error('[Hot Module Replacement] Unexpected error', e);
+      disconnect(client);
+    });
 
-      client.ws.on('close', () => disconnect(client));
+    client.ws.on('close', () => disconnect(client));
+    clients.push(client);
+
+    clientsPerBundleEntry[client.bundleEntry] = [...(
+      clientsPerBundleEntry[client.bundleEntry] ? clientsPerBundleEntry[client.bundleEntry] : []
+    ), client];
+
+    // Only register callback if it's the first client
+    if (clients.length === 1) {
+      packagerServer.setHMRFileChangeListener(onHMRChange);
+    }
+
   }
 
   function disconnect (disconnectedClient) {
-    clients = clients.filter(client => client != disconnectedClient);
+    clients = clients.filter(client => client !== disconnectedClient);
+    clientsPerBundleEntry[client.bundleEntry] = clientsPerBundleEntry[client.bundleEntry].filter(client => client !== disconnectedClient);
     //Only clear change listener if there are no more listening clients
     if (clients.length === 0) {
       packagerServer.setHMRFileChangeListener(null);
@@ -59,7 +57,7 @@ function attachHMRServer({httpServer, path, packagerServer}) {
 
   function connectedPlatformClients () {
     return {
-      android: clients.filter(client => client.platform === "android"), 
+      android: clients.filter(client => client.platform === "android"),
       iOS: clients.filter(client => client.platform === "iOS"),
     }
   }
@@ -72,178 +70,202 @@ function attachHMRServer({httpServer, path, packagerServer}) {
     ]).then(results => ({
        android: results[0],
        iOS: results[1],
-    }))
+    }));
   }
 
-  function sendToClients (message, platform) {
-    if (platform) {
-      clients.forEach(client => client.ws.send(JSON.stringify(message)));
+  function forEachBundleEntry (callback) {
+    return forEachPlatform(platform =>
+      forEachKey(platformCache[platform], bundleEntry =>
+        callback(bundleEntry, platform)
+      )
+    )
+  }
+
+  function sendToClients (message, platform, bundleEntry) {
+    if (platform && bundleEntry) {
+      clientsPerBundleEntry[bundleEntry].map(client => {
+        if (client.platform === platform) {
+          client.ws.send(JSON.stringify(message))
+        }
+      })
     }
     else {
-      connectedPlatformClients()[platform].map(client => client.ws.send(message))
+      clients.forEach(client => client.ws.send(JSON.stringify(message)));
     }
   }
 
   // Runs whenever a file changes
   function onHMRChange (filename, stat)  {
-      if (clients.length === 0) {
-        return;
-      }
 
-      sendToClients({type: 'update-start'});
+    if (clients.length === 0) {
+      return;
+    }
 
-      stat.then(() => {
-        return packagerServer.getShallowDependencies(filename)
-          .then(deps => {
-            if (clients.length === 0) {
-              return {};
-            }
+    sendToClients({type: 'update-start'});
 
-            return forEachPlatform(platform => {
-              // if the file dependencies have change we need to invalidate the
-              // dependencies caches because the list of files we need to send
-              // to the client may have changed
-              const oldDependencies = platformCache[platform].shallowDependencies[filename];
-              if (arrayEquals(deps, oldDependencies)) {
-                // Need to create a resolution response to pass to the bundler
-                // to process requires after transform. By providing a
-                // specific response we can compute a non recursive one which
-                // is the least we need and improve performance.
-                return packagerServer.getDependencies({
-                  platform: platform,
-                  dev: true,
-                  entryFile: filename,
-                  recursive: true,
-                }).then(response => {
-                  const module = packagerServer.getModuleForPath(filename);
+    stat.then(() => {
+      return packagerServer.getShallowDependencies(filename)
+        .then(deps => {
+          if (clients.length === 0) {
+            return;
+          }
 
-                  return response.copy({dependencies: [module]});
-                });
-              }
+          //Check the depedencies for each bundle entry
+          return forEachBundleEntry((bundleEntry, platform) => {
+            // if the file dependencies have change we need to invalidate the
+            // dependencies caches because the list of files we need to send
+            // to the client may have changed
+            const oldDependencies = platformCache[platform][bundleEntry].shallowDependencies[filename];
+            if (arrayEquals(deps, oldDependencies)) {
+              console.log(bundleEntry, platform, "WAS SAME")
+              // Need to create a resolution response to pass to the bundler
+              // to process requires after transform. By providing a
+              // specific response we can compute a non recursive one which
+              // is the least we need and improve performance.
+              return packagerServer.getDependencies({
+                platform,
+                dev: true,
+                entryFile: filename,
+                recursive: true,
+              }).then(response => {
+                const module = packagerServer.getModuleForPath(filename);
 
-              // if there're new dependencies compare the full list of
-              // dependencies we used to have with the one we now have
-              return getDependencies(platform, platformCache.bundleEntry)
-                .then(({
-                  dependenciesCache,
-                  dependenciesModulesCache,
-                  shallowDependencies,
-                  resolutionResponse,
-                }) => {
-
-                  // build list of modules for which we'll send HMR updates
-                  const modulesToUpdate = [packagerServer.getModuleForPath(filename)];
-                  Object.keys(dependenciesModulesCache).forEach(module => {
-                    if (!platformCache[platform].dependenciesModulesCache[module]) {
-                      modulesToUpdate.push(dependenciesModulesCache[module]);
-                    }
-                  });
-
-                  // invalidate caches
-                  platformCache[platform].dependenciesCache = dependenciesCache;
-                  platformCache[platform].dependenciesModulesCache = dependenciesModulesCache;
-                  platformCache[platform].shallowDependencies = shallowDependencies;
-
-                  return resolutionResponse.copy({
-                    dependencies: modulesToUpdate
-                  });
-                });
-              
-            });
-          })
-          .then((resolutionResponse) => {
-            if (clients.length === 0) {
-              return {};
-            }
-            return forEachPlatform(platform => {
-              
-              if (!resolutionResponse[platform]) {
-                return;
-              }
-
-              if (!platformCache[platform].shallowDependencies[filename]){
-                return;
-              }
-              
-              return packagerServer.buildBundleForHMR({
-                entryFile: platformCache[platform].bundleEntry,
-                platform: platform,
-                resolutionResponse,
+                return response.copy({dependencies: [module]});
               });
-            });
-          })
-          .then(bundles => {
-            if (clients.length === 0) {
-              return {};
             }
+            console.log(bundleEntry, platform, "WASNT SAME")
 
-            return forEachPlatform(platform => {
+            // if there're new dependencies compare the full list of
+            // dependencies we used to have with the one we now have
+            return getDependencies(platform, bundleEntry)
+              .then(({
+                dependenciesCache,
+                dependenciesModulesCache,
+                shallowDependencies,
+                resolutionResponse,
+              }) => {
 
-              const bundle = bundles[platform];
+                // build list of modules for which we'll send HMR updates
+                const modulesToUpdate = [packagerServer.getModuleForPath(filename)];
+                Object.keys(dependenciesModulesCache).forEach(module => {
+                  if (!platformCache[platform][bundleEntry].dependenciesModulesCache[module]) {
+                    modulesToUpdate.push(dependenciesModulesCache[module]);
+                  }
+                });
 
-              if (!bundle || bundle.isEmpty()) {
-                return;
-              }
-              return {
-                type: 'update',
-                body: {
-                  modules: bundle.getModulesCode(),
-                  sourceURLs: bundle.getSourceURLs(),
-                  sourceMappingURLs: bundle.getSourceMappingURLs(),
-                },
-              };
-            });
-          })
-          .catch(error => {
-            // send errors to the client instead of killing packager server
-            let body;
-            if (error.type === 'TransformError' ||
-                error.type === 'NotFoundError' ||
-                error.type === 'UnableToResolveError') {
-              body = {
-                type: error.type,
-                description: error.description,
-                filename: error.filename,
-                lineNumber: error.lineNumber,
-              };
-            } else {
-              console.error(error.stack || error);
-              body = {
-                type: 'InternalError',
-                description: 'react-packager has encountered an internal error, ' +
-                  'please check your terminal error output for more details',
-              };
-            }
+                // invalidate caches
+                platformCache[platform][bundleEntry].dependenciesCache = dependenciesCache;
+                platformCache[platform][bundleEntry].dependenciesModulesCache = dependenciesModulesCache;
+                platformCache[platform][bundleEntry].shallowDependencies = shallowDependencies;
 
-            return forEachPlatform(platform => ({type: 'error', body}));
-          })
-          .then(update => {
-            if (clients.length === 0) {
+                return resolutionResponse.copy({
+                  dependencies: modulesToUpdate,
+                });
+              });
+
+          });
+        })
+        .then((resolutionResponses) => {
+          if (clients.length === 0 || !resolutionResponses) {
+            return;
+          }
+
+          return forEachBundleEntry((bundleEntry, platform) => {
+
+            if (!resolutionResponses[platform] || !resolutionResponses[platform][bundleEntry]) {
               return;
             }
 
-            forEachPlatform(platform => {
-              if (!update[platform]) {
-                return;
-              }
-              sendToClients(update[platform], platform);
+            if (!platformCache[platform][bundleEntry].shallowDependencies[filename]){
+              return;
+            }
+            console.log(bundleEntry, platform)
+
+            const resolutionResponse = resolutionResponses[platform][bundleEntry];
+
+            return packagerServer.buildBundleForHMR({
+              entryFile: bundleEntry,
+              platform,
+              resolutionResponse,
             });
-          })
-        },
-        () => {
-          // do nothing, file was removed
-        }
-      ).finally(() => {
-        sendToClients({type: 'update-done'});
-      });
-    }
+          });
+        })
+        .then(bundles => {
+          if (clients.length === 0 || !bundles) {
+            return;
+          }
+
+          return forEachBundleEntry((bundleEntry, platform) => {
+
+            if (!bundles[platform]) {
+              return;
+            }
+
+            const bundle = bundles[platform][bundleEntry];
+
+            if (!bundle || bundle.isEmpty()) {
+              return;
+            }
+            return {
+              type: 'update',
+              body: {
+                modules: bundle.getModulesCode(),
+                sourceURLs: bundle.getSourceURLs(),
+                sourceMappingURLs: bundle.getSourceMappingURLs(),
+              },
+            };
+          });
+        })
+        .catch(error => {
+          // send errors to the client instead of killing packager server
+          let body;
+          if (error.type === 'TransformError' ||
+              error.type === 'NotFoundError' ||
+              error.type === 'UnableToResolveError') {
+            body = {
+              type: error.type,
+              description: error.description,
+              filename: error.filename,
+              lineNumber: error.lineNumber,
+            };
+          } else {
+            console.error(error.stack || error);
+            body = {
+              type: 'InternalError',
+              description: 'react-packager has encountered an internal error, ' +
+                'please check your terminal error output for more details',
+            };
+          }
+
+          return forEachBundleEntry((bundleEntry, platform) => ({type: 'error', body}));
+        })
+        .then(update => {
+          if (clients.length === 0 || !update) {
+            return;
+          }
+
+          forEachBundleEntry((bundleEntry, platform) => {
+            if (!update[platform] || !update[platform][bundleEntry]) {
+              return;
+            }
+            sendToClients(update[platform][bundleEntry], platform, bundleEntry);
+          });
+        })
+      },
+      () => {
+        // do nothing, file was removed
+      }
+    ).finally(() => {
+      sendToClients({type: 'update-done'});
+    });
+  }
 
   // Returns a promise with the full list of dependencies and the shallow
   // dependencies each file on the dependency list has for the give platform
   // and entry file.
   function getDependencies(platform, bundleEntry) {
     return packagerServer.getDependencies({
-      platform: platform,
+      platform,
       dev: true,
       entryFile: bundleEntry,
     }).then(response => {
@@ -317,14 +339,14 @@ function attachHMRServer({httpServer, path, packagerServer}) {
         const client = {
           ws,
           platform: params.platform,
+          bundleEntry: params.bundleEntry,
         };
 
         //Set the platform dependency cache when a new client connects
-        platformCache[params.platform] = {
+        platformCache[params.platform][params.bundleEntry] = {
           dependenciesCache,
           dependenciesModulesCache,
           shallowDependencies,
-          bundleEntry: params.bundleEntry,
         };
 
         addClient(client);
@@ -354,6 +376,17 @@ function wrapPotentialPromise (valueOrPromise) {
   else {
     return Promise.resolve(valueOrPromise)
   }
+}
+
+function forEachKey (object, callback) {
+  const keys = Object.keys(object);
+  return Promise.all(
+    keys.map(key => wrapPotentialPromise(callback(key, object[key])))
+  ).then(results => {
+    const newObject = {};
+    keys.forEach((key, index) => newObject[key] = results[index]);
+    return newObject;
+  })
 }
 
 module.exports = attachHMRServer;
