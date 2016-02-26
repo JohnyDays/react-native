@@ -101,6 +101,9 @@ function attachHMRServer({httpServer, path, packagerServer}) {
       return;
     }
 
+    console.log(
+       `[Hot Module Replacement] File change detected (${time()})`
+     );
     sendToClients({type: 'update-start'});
 
     stat.then(() => {
@@ -248,6 +251,7 @@ function attachHMRServer({httpServer, path, packagerServer}) {
             if (!update[platform] || !update[platform][bundleEntry]) {
               return;
             }
+            console.log(`[Hot Module Replacement] Sending HMR update to client (${time()})`);
             sendToClients(update[platform][bundleEntry], platform, bundleEntry);
           });
         })
@@ -365,6 +369,12 @@ function arrayEquals(arrayA, arrayB) {
     })
   );
 }
+
+function time() {
+  const date = new Date();
+  return `${date.getHours()}:${date.getMinutes()}:${date.getSeconds()}:${date.getMilliseconds()}`;
+}
+
 
 function wrapPotentialPromise (valueOrPromise) {
   if (valueOrPromise == null) {
