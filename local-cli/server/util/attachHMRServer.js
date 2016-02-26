@@ -22,7 +22,7 @@ function attachHMRServer({httpServer, path, packagerServer}) {
 
   let platformCache = {
     android: {},
-    iOS: {},
+    ios: {},
   };
 
   function addClient (client) {
@@ -58,7 +58,7 @@ function attachHMRServer({httpServer, path, packagerServer}) {
   function connectedPlatformClients () {
     return {
       android: clients.filter(client => client.platform === "android"),
-      iOS: clients.filter(client => client.platform === "iOS"),
+      ios: clients.filter(client => client.platform === "ios"),
     }
   }
 
@@ -66,10 +66,10 @@ function attachHMRServer({httpServer, path, packagerServer}) {
     const platformClients = connectedPlatformClients();
     return Promise.all([
       wrapPotentialPromise(platformClients.android.length > 0 ? callback("android", platformClients.android) : null),
-      wrapPotentialPromise(platformClients.iOS.length > 0 ? callback("iOS", platformClients.iOS) : null),
+      wrapPotentialPromise(platformClients.ios.length > 0 ? callback("ios", platformClients.ios) : null),
     ]).then(results => ({
        android: results[0],
-       iOS: results[1],
+       ios: results[1],
     }));
   }
 
@@ -101,9 +101,7 @@ function attachHMRServer({httpServer, path, packagerServer}) {
       return;
     }
 
-    console.log(
-       `[Hot Module Replacement] File change detected (${time()})`
-     );
+    console.log(`[Hot Module Replacement] File change detected (${time()})`);
     sendToClients({type: 'update-start'});
 
     stat.then(() => {
@@ -120,7 +118,6 @@ function attachHMRServer({httpServer, path, packagerServer}) {
             // to the client may have changed
             const oldDependencies = platformCache[platform][bundleEntry].shallowDependencies[filename];
             if (arrayEquals(deps, oldDependencies)) {
-              console.log(bundleEntry, platform, "WAS SAME")
               // Need to create a resolution response to pass to the bundler
               // to process requires after transform. By providing a
               // specific response we can compute a non recursive one which
@@ -182,15 +179,25 @@ function attachHMRServer({httpServer, path, packagerServer}) {
             if (!platformCache[platform][bundleEntry].shallowDependencies[filename]){
               return;
             }
-            console.log(bundleEntry, platform)
 
             const resolutionResponse = resolutionResponses[platform][bundleEntry];
 
+            const httpServerAddress = httpServer.address();
+
+            // Sanitize the value from the HTTP server
+            let packagerHost = 'localhost';
+            if (httpServerAddress.address &&
+                httpServerAddress.address !== '::' &&
+                httpServerAddress.address !== '') {
+              packagerHost = httpServerAddress.address;
+            }
+
+            let packagerPort = httpServerAddress.port;
             return packagerServer.buildBundleForHMR({
               entryFile: bundleEntry,
               platform,
               resolutionResponse,
-            });
+            }, packagerHost, packagerPort);
           });
         })
         .then(bundles => {
