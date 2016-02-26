@@ -48,7 +48,7 @@ function attachHMRServer({httpServer, path, packagerServer}) {
 
   function disconnect (disconnectedClient) {
     clients = clients.filter(client => client !== disconnectedClient);
-    clientsPerBundleEntry[disconnectedClient.bundleEntry] = clientsPerBundleEntry[client.bundleEntry].filter(client => client !== disconnectedClient);
+    clientsPerBundleEntry[disconnectedClient.bundleEntry] = clientsPerBundleEntry[disconnectedClient.bundleEntry].filter(client => client !== disconnectedClient);
     //Only clear change listener if there are no more listening clients
     if (clients.length === 0) {
       packagerServer.setHMRFileChangeListener(null);
